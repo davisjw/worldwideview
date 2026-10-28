@@ -1,7 +1,7 @@
 /* eslint-disable no-console */
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { isDemo } from "@/core/edition";
+import { isDemo, getEdition } from "@/core/edition";
 import { hasBetterAuthCookie } from "@/lib/proxy-auth";
 
 const HUB_REDIRECT_URL = process.env.NEXT_PUBLIC_HUB_REDIRECT_URL ?? "https://worldwideview.dev/hub"
@@ -13,8 +13,21 @@ const CACHE_TTL = 60_000; // 60 seconds
 // Anchored static-asset allowlist. Only requests ending in a real asset
 // extension bypass the auth gate. This replaces the former `path.includes(".")`
 // check, which let ANY dotted path (e.g. `/secret.page`, `/globe.config`)
-// skip authentication entirely.
-const STATIC_ASSET_RE = /\.(?:js|mjs|cjs|css|map|json|txt|xml|webmanifest|ico|png|jpe?g|gif|svg|webp|avif|bmp|woff2?|ttf|otf|eot|wasm|mp4|webm|glb|gltf)$/i;
+// skip authentication entirely. Implemented as a Set lookup on the trailing
+// extension (case-insensitive) instead of a regex: identical semantics, but no
+// regex evaluated against request-controlled paths.
+const STATIC_ASSET_EXTENSIONS = new Set([
+    "js", "mjs", "cjs", "css", "map", "json", "geojson", "txt", "xml",
+    "webmanifest", "ico", "png", "jpg", "jpeg", "gif", "svg", "webp",
+    "avif", "bmp", "woff", "woff2", "ttf", "otf", "eot", "wasm", "mp4",
+    "webm", "glb", "gltf",
+]);
+
+function isStaticAssetPath(path: string): boolean {
+    const dot = path.lastIndexOf(".");
+    if (dot === -1 || dot === path.length - 1) return false;
+    return STATIC_ASSET_EXTENSIONS.has(path.slice(dot + 1).toLowerCase());
+}
 
 // API routes that must stay reachable WITHOUT a logged-in session cookie.
 // Everything else under /api is deny-by-default (requires a valid session JWT).
@@ -28,7 +41,6 @@ const STATIC_ASSET_RE = /\.(?:js|mjs|cjs|css|map|json|txt|xml|webmanifest|ico|pn
 //    before their own auth runs, breaking install/manage from the marketplace origin.
 //  - glitchtip-tunnel/build/dev: telemetry/diagnostics (dev/* is NODE_ENV-gated to 403 in prod).
 const PUBLIC_API_PREFIXES = [
-    "/api/access-code",
     "/api/auth",
     "/api/ba",
     "/api/billing/webhook",
@@ -87,7 +99,7 @@ export default async function proxy(req: NextRequest) {
     // Extract subdomain if on cloud
     const hostname = req.headers.get("host") || "";
     let tenantSubdomain = null;
-    const isCloudDeploy = process.env.NEXT_PUBLIC_WWV_EDITION === "cloud";
+    const isCloudDeploy = getEdition() === "cloud";
 
     if (isCloudDeploy) {
         const isApp = hostname.includes(TENANT_DOMAIN) || hostname.includes(".localhost");
@@ -148,7 +160,7 @@ export default async function proxy(req: NextRequest) {
         path.startsWith("/_next")
         || path.startsWith("/data")
         || path.startsWith("/cesium")
-        || STATIC_ASSET_RE.test(path)
+        || isStaticAssetPath(path)
     ) {
         const res = NextResponse.next();
         res.headers.delete("x-tenant-subdomain");

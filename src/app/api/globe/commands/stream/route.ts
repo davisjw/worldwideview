@@ -22,7 +22,7 @@ import { getServerSession } from "@/lib/ba-session";
 import { authenticateApiKey } from "@/lib/apiKeyAuth";
 import { drainGlobeCommands } from "@/lib/globeCommandQueue";
 import { globeCommandsStreamLimiter, getClientIp } from "@/lib/rateLimiters";
-import { resolveEdition } from "@/core/edition";
+import { getEdition } from "@/core/edition";
 
 const SESSION_ID_RE = /^[0-9a-f-]{36}$/i;
 const POLL_INTERVAL_MS = 200;
@@ -46,7 +46,7 @@ export async function GET(request: Request): Promise<Response> {
     if (limited) return limited as Response;
 
     // Gate 2: demo edition -- read env at request time so vi.stubEnv works in tests
-    const currentEdition = resolveEdition(process.env.NEXT_PUBLIC_WWV_EDITION);
+    const currentEdition = getEdition();
     if (currentEdition === "demo") {
         return NextResponse.json({ error: "Demo mode" }, { status: 403 }) as Response;
     }
@@ -86,8 +86,31 @@ export async function GET(request: Request): Promise<Response> {
         async start(controller) {
             const encoder = new TextEncoder();
 
+            // The consumer can cancel at any moment -- a tab reload, a navigate,
+            // or an EventSource reconnect after MAX_DURATION_MS. The controller is
+            // then already closed, so a second close() throws "Invalid state:
+            // Controller is already closed". That throw used to error the whole
+            // response, which starved the client's reconnect loop and left commands
+            // undelivered; writes and the terminal close are therefore one-shot.
+            let finished = false;
+
             function send(chunk: string): void {
-                controller.enqueue(encoder.encode(chunk));
+                if (finished || cancelled) return;
+                try {
+                    controller.enqueue(encoder.encode(chunk));
+                } catch {
+                    finished = true;
+                }
+            }
+
+            function finish(): void {
+                if (finished) return;
+                finished = true;
+                try {
+                    controller.close();
+                } catch {
+                    // The consumer closed the stream first; there is nothing to end.
+                }
             }
 
             const startTime = Date.now();
@@ -95,6 +118,8 @@ export async function GET(request: Request): Promise<Response> {
 
             try {
                 while (Date.now() - startTime < MAX_DURATION_MS) {
+                    if (cancelled) break;
+
                     const commands = await drainGlobeCommands(resolvedUserId, resolvedSessionId);
                     for (const cmd of commands) {
                         send("data: " + JSON.stringify({ commands: [cmd] }) + "\n\n");
@@ -106,13 +131,19 @@ export async function GET(request: Request): Promise<Response> {
                     }
 
                     await sleep(POLL_INTERVAL_MS);
-                    if (cancelled) break;
                 }
 
-                controller.close();
+                finish();
             } catch (err) {
                 console.error("[globe/commands/stream] stream error:", err);
-                controller.error(err);
+                if (!finished) {
+                    finished = true;
+                    try {
+                        controller.error(err);
+                    } catch {
+                        // Already closed by the consumer; the log above is the record.
+                    }
+                }
             }
         },
         cancel() {

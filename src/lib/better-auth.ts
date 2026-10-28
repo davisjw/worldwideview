@@ -6,23 +6,45 @@
  *
  * Key decisions:
  *  - cookiePrefix "better-auth" avoids collision with other auth cookies
- *  - trustedOrigins: static list from env vars + localhost defaults, with
- *    dynamic origin trust in local edition (single-tenant, no CSRF risk)
+ *  - trustedOrigins: static list from env vars + local dev defaults (both the
+ *    localhost and 127.0.0.1 spellings), with dynamic origin trust in local
+ *    edition (single-tenant, no CSRF risk)
  *  - basePath: "/api/ba" for the Better Auth API handler
  *  - All 5 plugins configured: organization, admin, jwt, oneTimeToken, apiKey
  */
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 import { prisma } from "@/lib/db";
-import { isLocal } from "@/core/edition";
-import { organization, admin, jwt } from "better-auth/plugins";
+import { isLocal, isDemo } from "@/core/edition";
+import { organization, admin } from "better-auth/plugins";
 import { oneTimeToken } from "better-auth/plugins/one-time-token";
 import { apiKey } from "@better-auth/api-key";
+import { jwtPlugin } from "@/lib/auth/jwt-plugin";
 import { evaluatePasswordStrength, MIN_PASSWORD_SCORE } from "@/lib/password-strength";
+
+/** Ports the local dev servers listen on: globe 3000, hub 3001, marketplace 3002. */
+const LOCAL_DEV_PORTS = [3000, 3001, 3002] as const;
+
+/**
+ * Origin spellings for the local dev servers.
+ *
+ * `localhost` is always trusted, matching the previous hardcoded list. The
+ * `127.0.0.1` alias names the same machine, and a developer who opens
+ * http://127.0.0.1:3000 sends that spelling as the request Origin — Better Auth
+ * then rejects it as an untrusted origin and sign-in never issues a session
+ * cookie. The alias is added only outside production, so a cloud/demo
+ * deployment keeps exactly the origin rule it had before. A local-edition
+ * production build (self-host) needs no alias here: resolveTrustedOrigins
+ * already trusts the origin the operator's browser actually sends.
+ */
+export function buildLocalDevOrigins(trustLoopbackAlias: boolean): string[] {
+    const hosts = trustLoopbackAlias ? ["localhost", "127.0.0.1"] : ["localhost"];
+    return hosts.flatMap((host) => LOCAL_DEV_PORTS.map((port) => `http://${host}:${port}`));
+}
 
 /**
  * Build the static base list of trusted origins from environment variables.
- * Includes configured app URLs and localhost dev defaults. Deduplicates.
+ * Includes configured app URLs and local dev defaults. Deduplicates.
  * Exported for unit testing.
  */
 export function buildTrustedOrigins(): string[] {
@@ -30,9 +52,7 @@ export function buildTrustedOrigins(): string[] {
         process.env.NEXT_PUBLIC_APP_URL,
         process.env.NEXT_PUBLIC_WEB_APP_URL,
         process.env.NEXT_PUBLIC_MARKETPLACE_URL,
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://localhost:3002",
+        ...buildLocalDevOrigins(process.env.NODE_ENV !== "production"),
     ].filter(Boolean) as string[];
 
     const extra = (process.env.BETTER_AUTH_TRUSTED_ORIGINS ?? "")
@@ -50,8 +70,10 @@ export function buildTrustedOrigins(): string[] {
  * incoming Origin header — the operator is the sole user, so there is
  * no meaningful CSRF risk worth defending at this layer.
  *
- * In cloud/demo editions, returns only the static configured list to
- * preserve multi-tenant CSRF protection.
+ * In cloud/demo editions, dynamically trusts origins that match the
+ * request's own host (e.g., tester.cloud-wwv.dev), because each cloud
+ * instance has its own subdomain. This is safe — the origin is the same
+ * server the user is accessing.
  *
  * Better Auth calls this per-request. `request` is `undefined` during
  * initialization and auth.api calls.
@@ -59,14 +81,46 @@ export function buildTrustedOrigins(): string[] {
 export async function resolveTrustedOrigins(request?: Request): Promise<string[]> {
     const base = buildTrustedOrigins();
     if (!request) return base;
-    if (isLocal) {
-        const origin = request.headers.get("Origin");
-        if (origin && origin !== "null") {
+    const origin = request.headers.get("Origin");
+    if (origin && origin !== "null") {
+        if (isLocal) {
             base.push(origin);
+        } else {
+            // Cloud/demo: trust origins matching the request's own host
+            // This lets multi-tenant subdomains (e.g., tester.cloud-wwv.dev)
+            // authenticate without adding each one to a static list
+            try {
+                const host = request.headers.get("Host") || new URL(request.url).host;
+                const originHost = new URL(origin).host;
+                if (originHost === host) {
+                    base.push(origin);
+                }
+            } catch {
+                // Malformed URL — skip
+            }
         }
     }
     return [...new Set(base)];
 }
+
+/**
+ * Decide whether session cookies carry the `__Secure-` prefix + Secure attribute.
+ *
+ * Better Auth's default enables them whenever NODE_ENV=production and no
+ * baseURL is configured (better-auth/dist/cookies/index.mjs falls back to
+ * `isProduction`). That silently breaks every plain-HTTP serving of the
+ * production build: WebKit (Safari and WebKitGTK) refuses `__Secure-`/Secure
+ * cookies over http — with no localhost exemption, unlike Chromium and
+ * Firefox — so the session cookie is dropped and every navigation bounces
+ * back to /login (the PR #430 webkit-only Playwright CI failures; also any
+ * http LAN self-host for Safari users). Derive the flag from the configured
+ * app URL's protocol instead. When no URL is configured, leave the option
+ * unset so Better Auth's own default still applies.
+ */
+const resolvedAppUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.BETTER_AUTH_URL || "";
+const useSecureCookies: boolean | undefined = resolvedAppUrl
+    ? resolvedAppUrl.startsWith("https://")
+    : undefined;
 
 export const auth = betterAuth({
     basePath: "/api/ba",
@@ -75,6 +129,8 @@ export const auth = betterAuth({
     }),
     emailAndPassword: {
         enabled: true,
+        // Demo is public read-only; no self-registration (issue #400).
+        disableSignUp: isDemo,
         // Validate password strength at sign-up and password reset.
         // Rejects passwords scoring below MIN_PASSWORD_SCORE (2).
         passwordValidator: async (password: string) => {
@@ -94,6 +150,7 @@ export const auth = betterAuth({
                 type: "string",
                 required: true,
                 defaultValue: "user",
+                input: false, // never accept a client-supplied role (privilege-escalation guard)
             },
         },
     },
@@ -108,6 +165,7 @@ export const auth = betterAuth({
     },
     advanced: {
         cookiePrefix: "better-auth",
+        useSecureCookies,
     },
     trustedOrigins: resolveTrustedOrigins,
     // Phase 72: All five Better Auth plugins configured.
@@ -128,9 +186,7 @@ export const auth = betterAuth({
         admin(),
         // JWT + JWKS — token endpoint at /api/ba/token, JWKS at /api/ba/jwks.
         // The data engine fetches JWKS from this endpoint to verify plugin tickets.
-        jwt({
-            schema: { jwks: { modelName: "pluginJwks" } },
-        }),
+        jwtPlugin,
         // One-time tokens — replaces setup token flow from src/lib/auth/setupToken.ts.
         // Tokens expire after 1 hour by default.
         oneTimeToken({ expiresIn: 3600 }),

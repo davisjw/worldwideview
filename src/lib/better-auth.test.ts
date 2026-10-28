@@ -274,6 +274,46 @@ describe("buildTrustedOrigins", () => {
         expect(result).toContain("http://other.com");
         expect(result.every((u) => u.trim().length > 0)).toBe(true);
     });
+
+    it("trusts the 127.0.0.1 spelling of the dev ports outside production", async () => {
+        mockIsCloud = true;
+        vi.stubEnv("NODE_ENV", "test");
+        vi.resetModules();
+        const mod = await import("@/lib/better-auth");
+        const result = mod.buildTrustedOrigins();
+        expect(result).toContain("http://127.0.0.1:3000");
+        expect(result).toContain("http://127.0.0.1:3001");
+        expect(result).toContain("http://127.0.0.1:3002");
+    });
+
+    it("keeps the 127.0.0.1 alias out of a production cloud deployment", async () => {
+        mockIsCloud = true;
+        vi.stubEnv("NODE_ENV", "production");
+        vi.resetModules();
+        const mod = await import("@/lib/better-auth");
+        const result = mod.buildTrustedOrigins();
+        expect(result).toContain("http://localhost:3000");
+        expect(result).not.toContain("http://127.0.0.1:3000");
+        expect(result).not.toContain("http://127.0.0.1:3001");
+    });
+});
+
+describe("buildLocalDevOrigins", () => {
+    it("covers both loopback spellings for every dev port when the alias is trusted", async () => {
+        const mod = await import("@/lib/better-auth");
+        const result = mod.buildLocalDevOrigins(true);
+        for (const port of [3000, 3001, 3002]) {
+            expect(result).toContain(`http://localhost:${port}`);
+            expect(result).toContain(`http://127.0.0.1:${port}`);
+        }
+    });
+
+    it("keeps only the localhost spelling when the alias is not trusted", async () => {
+        const mod = await import("@/lib/better-auth");
+        const result = mod.buildLocalDevOrigins(false);
+        expect(result).toContain("http://localhost:3000");
+        expect(result.some((origin) => origin.includes("127.0.0.1"))).toBe(false);
+    });
 });
 
 describe("resolveTrustedOrigins", () => {
@@ -301,15 +341,64 @@ describe("resolveTrustedOrigins", () => {
         expect(result).toContain("http://192.168.1.50:3000");
     });
 
-    it("does NOT append request origin when isLocal is false", async () => {
+    it("does NOT append request origin when isLocal is false and origin mismatches", async () => {
         mockIsCloud = true;
         vi.resetModules();
         const mod = await import("@/lib/better-auth");
         const request = new Request("http://192.168.1.50:3000/test", {
-            headers: { Origin: "http://192.168.1.50:3000" },
+            headers: { Origin: "http://evil.com" },
         });
         const result = await mod.resolveTrustedOrigins(request);
-        expect(result).not.toContain("http://192.168.1.50:3000");
+        expect(result).not.toContain("http://evil.com");
+    });
+
+    it("trusts request origin on cloud when origin matches request host", async () => {
+        mockIsCloud = true;
+        vi.resetModules();
+        const mod = await import("@/lib/better-auth");
+        const request = new Request("https://tester.cloud-wwv.dev/test", {
+            headers: { Origin: "https://tester.cloud-wwv.dev" },
+        });
+        const result = await mod.resolveTrustedOrigins(request);
+        expect(result).toContain("https://tester.cloud-wwv.dev");
+    });
+
+    it("trusts the 127.0.0.1 origin in local edition", async () => {
+        mockIsCloud = false;
+        vi.resetModules();
+        const mod = await import("@/lib/better-auth");
+        const request = new Request("http://127.0.0.1:3000/api/ba/sign-in/email", {
+            headers: { Origin: "http://127.0.0.1:3000", Host: "127.0.0.1:3000" },
+        });
+        const result = await mod.resolveTrustedOrigins(request);
+        expect(result).toContain("http://127.0.0.1:3000");
+    });
+
+    it("trusts the 127.0.0.1 origin in production only via the request-host rule", async () => {
+        mockIsCloud = true;
+        vi.stubEnv("NODE_ENV", "production");
+        vi.resetModules();
+        const mod = await import("@/lib/better-auth");
+        const request = new Request("http://127.0.0.1:3000/api/ba/sign-in/email", {
+            headers: { Origin: "http://127.0.0.1:3000", Host: "127.0.0.1:3000" },
+        });
+        const result = await mod.resolveTrustedOrigins(request);
+        expect(result).toContain("http://127.0.0.1:3000");
+        // Proof the alias list stayed out of production: only the origin that
+        // matches the request host is added, not the whole loopback range.
+        expect(result).not.toContain("http://127.0.0.1:3001");
+    });
+
+    it("still rejects a foreign origin on the 127.0.0.1 host in production", async () => {
+        mockIsCloud = true;
+        vi.stubEnv("NODE_ENV", "production");
+        vi.resetModules();
+        const mod = await import("@/lib/better-auth");
+        const request = new Request("http://127.0.0.1:3000/api/ba/sign-in/email", {
+            headers: { Origin: "http://evil.example", Host: "127.0.0.1:3000" },
+        });
+        const result = await mod.resolveTrustedOrigins(request);
+        expect(result).not.toContain("http://evil.example");
     });
 });
 
@@ -333,15 +422,22 @@ describe("regression: #292", () => {
         expect(result).toContain("http://192.168.1.50:3000");
     });
 
-    it("cloud edition does not auto-trust request origins", async () => {
+    it("cloud edition trusts origin matching request host, rejects foreign origin", async () => {
         mockIsCloud = true;
         vi.resetModules();
         const mod = await import("@/lib/better-auth");
-        const request = new Request("http://192.168.1.50:3000/test", {
+        // Origin matching the request's own host is trusted (same-server)
+        const legitRequest = new Request("http://192.168.1.50:3000/test", {
             headers: { Origin: "http://192.168.1.50:3000" },
         });
-        const result = await mod.resolveTrustedOrigins(request);
-        expect(result).not.toContain("http://192.168.1.50:3000");
+        const legitResult = await mod.resolveTrustedOrigins(legitRequest);
+        expect(legitResult).toContain("http://192.168.1.50:3000");
+        // Foreign origin is rejected (CSRF protection)
+        const evilRequest = new Request("http://192.168.1.50:3000/test", {
+            headers: { Origin: "http://evil.com" },
+        });
+        const evilResult = await mod.resolveTrustedOrigins(evilRequest);
+        expect(evilResult).not.toContain("http://evil.com");
     });
 
     it("explicit NEXT_PUBLIC_APP_URL works for any edition", async () => {

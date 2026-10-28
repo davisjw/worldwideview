@@ -4,7 +4,20 @@ const nextConfig: NextConfig = {
   output: "standalone",
   serverExternalPackages: ["@prisma/client", "prisma"],
   transpilePackages: ["@worldwideview/wwv-plugin-sdk", "resium", "react-player", "satellite.js", "@worldwideview/wwv-plugin-fortiguard", "@worldwideview/wwv-plugin-nz-traffic-cameras"],
-  allowedDevOrigins: process.env.ALLOWED_DEV_ORIGIN ? [process.env.ALLOWED_DEV_ORIGIN] : undefined,
+  allowedDevOrigins: [
+    "*.wwv.local",
+    "wwv.local",
+    "app.wwv.local",
+    "localhost",
+    // The dev server refuses the browser's module-script requests (403) unless
+    // their Origin is listed here. 127.0.0.1 is the same machine as localhost
+    // but a different origin to the browser, so omitting it served the page and
+    // then blocked every chunk that would hydrate it: the sign-in form rendered
+    // and silently did nothing.
+    "127.0.0.1",
+    "[::1]",
+    ...(process.env.ALLOWED_DEV_ORIGIN ? process.env.ALLOWED_DEV_ORIGIN.split(",") : []),
+  ],
   experimental: {
     memoryBasedWorkersCount: true,
     cpus: 2,
@@ -14,7 +27,10 @@ const nextConfig: NextConfig = {
     "/*": ["./scripts/**/*"],
   },
   typescript: {
-    ignoreBuildErrors: true,
+    // Keep this armed. The build is the only step that both generates and
+    // checks the per-route validators under .next/types/app; a standalone
+    // `tsc --noEmit` on a checkout with no .next cannot see them at all.
+    ignoreBuildErrors: false,
   },
   async headers() {
     return [

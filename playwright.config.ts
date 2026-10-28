@@ -22,6 +22,12 @@ export default defineConfig({
   // marketplace-from-instance.spec.ts uses playwright.marketplace.config.ts; full-flow requires marketplace repo
   // marketplace-redirect-handshake.spec.ts and marketplace-sign-out.spec.ts require marketplace.wwv.local:3002
   //   — use playwright.cross-app.config.ts for these cross-origin handshake tests
+  // billing-flow.spec.ts / billing-no-org.spec.ts target the web hub billing stack (seeded globe user, hub, Supabase, Stripe)
+  //   — use the web repo's playwright.billing.config.ts (billing is web-owned, ADR-0009)
+  // example.spec.ts is a redundant smoke test — its app-boot assertions duplicate plugin-system.spec.ts's boot;
+  //   skipping it removes one full app cold-boot from every local run
+  // account-connect-e2e.spec.ts is a cross-app spec with hardcoded https://wwv.local URLs, env-gated test.skip,
+  //   and targets the web-hub accounts flow — it belongs to playwright.web.config.ts, not this main config
   testIgnore: [
     '**/pact/**',
     '**/ci/**',
@@ -29,6 +35,10 @@ export default defineConfig({
     '**/marketplace-from-instance.spec.ts',
     '**/marketplace-redirect-handshake.spec.ts',
     '**/marketplace-sign-out.spec.ts',
+    '**/billing-flow.spec.ts',
+    '**/billing-no-org.spec.ts',
+    '**/example.spec.ts',
+    '**/account-connect-e2e.spec.ts',
   ],
   /* Run tests in files in parallel */
   fullyParallel: true,
@@ -69,8 +79,18 @@ export default defineConfig({
           firefoxUserPrefs: {
             // Disable MSAA/AT-SPI accessibility layer — causes hangs on Linux CI
             'accessibility.force_disabled': 1,
+            // Firefox headless cannot create a WebGL context at all (upstream
+            // bugzilla 1375585, still open), so Cesium never renders there and
+            // camera.flyTo never animates: the camera stays at its start position and
+            // mcp-connect-flow's "camera must fly" assertion times out. Chromium
+            // (SwiftShader) and WebKit render anyway, which is why only this project
+            // failed. Accepting a software rasteriser does not help on its own; the
+            // firefox CI job runs headed under xvfb-run with one instead.
+            'webgl.force-enabled': true,
+            'webgl.forbid-software': false,
           },
         },
+        headless: process.env.CI ? false : undefined,
       },
     },
     {
@@ -82,30 +102,39 @@ export default defineConfig({
     },
   ],
 
-  /* Run dev servers before starting the tests */
+  /* Run dev servers before starting the tests.
+   * The marketplace webServer entry was removed: no spec in this config's
+   * testIgnore set targets the marketplace (marketplace-*.spec.ts are all
+   * ignored here), so booting it cost time on every local run for nothing.
+   * Marketplace flows use playwright.marketplace.config.ts / cross-app config.
+   */
   webServer: [
     {
-      command: 'pnpm dev',
+      // CI: boot the production STANDALONE server (pnpm build runs in .github/workflows/playwright.yml
+      // first). `next start` cannot serve an `output: "standalone"` build — Next warns and the app
+      // never hydrates under WebKitGTK (the PR #430 webkit CI failures). scripts/serve-standalone.mjs
+      // mirrors the Dockerfile: copies static assets into .next/standalone and runs
+      // .next/standalone/server.js. Faster and more reliable than dev: no per-route compile,
+      // no HMR websocket keeping networkidle alive.
+      // Local: dev server for hot reload.
+      command: process.env.CI ? 'node scripts/serve-standalone.mjs' : 'pnpm dev',
       env: {
         PORT: '3001',
         NEXT_PUBLIC_WWV_EDITION: 'cloud',
         CROSS_SERVICE_SECRET: 'test-cross-service-secret-for-e2e',
         NEXT_PUBLIC_APP_URL: 'http://localhost:3001',
         NEXT_PUBLIC_MARKETPLACE_URL: 'http://localhost:3002',
+        // Empty HUB_REDIRECT_URL = local-dev mode (proxy.ts skips the hub
+        // redirect). Without this, a stale .env.local value pointing back at
+        // localhost:3001 makes the proxy 307-loop the root path, which hangs
+        // the webServer readiness probe and globalSetup's warm-up fetch.
+        NEXT_PUBLIC_HUB_REDIRECT_URL: '',
       },
       url: 'http://localhost:3001',
       reuseExistingServer: !process.env.CI,
-      timeout: 120 * 1000,
+      // Cold boots run predev (boot-db, safe-db-push, prisma generate,
+      // copy-cesium, sync-local-plugins) which can exceed 120s on first run.
+      timeout: 300 * 1000,
     },
-    // Only start marketplace when the repo is checked out alongside worldwideview.
-    // In CI the marketplace dir does not exist — omitting it prevents spawn ENOENT.
-    ...(hasMarketplace ? [{
-      command: 'pnpm dev',
-      cwd: MARKETPLACE_DIR,
-      env: { PORT: '3002' },
-      url: 'http://localhost:3002',
-      reuseExistingServer: !process.env.CI,
-      timeout: 120 * 1000,
-    }] : []),
   ],
 });

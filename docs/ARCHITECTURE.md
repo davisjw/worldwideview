@@ -59,7 +59,7 @@ All four are now dynamically imported at runtime as ES module bundles via `loadP
 > [!IMPORTANT]
 > Plugin types are re-exported from the SDK through `src/core/plugins/PluginTypes.ts` and `src/core/plugins/PluginManifest.ts`. The **source of truth is always `@worldwideview/wwv-plugin-sdk`** — never define plugin types locally.
 
-For the contributor checklist when authoring a plugin, see [`.agents/skills/worldwideview-plugin-creation/`](../.agents/skills/) and the [Plugin Quickstart](plugin-quickstart.md).
+For the contributor checklist when authoring a plugin, see [`.agents/workflows/worldwideview-plugin-creation/SKILL.md`](../.agents/workflows/worldwideview-plugin-creation/SKILL.md) and the [Plugin Quickstart](plugin-quickstart.md).
 
 ## State Management
 
@@ -106,9 +106,9 @@ The `DataBus` is a custom typed pub/sub singleton (see [`src/core/data/DataBus.t
 
 The data engine ([`wwv-data-engine`](https://github.com/silvertakana/wwv-data-engine), public) is a **content-agnostic runner**. It discovers and executes seeder scripts from a configurable directory; the engine itself knows nothing about specific data sources.
 
-- **Local development**: The engine runs via Docker Compose on port 5001, reading seeders dynamically from `local-seeders/` (split into `community` and `private` tiers).
-- **Production**: The engine container on Coolify downloads release bundles from `wwv-seeders-community` and `wwv-seeders-private` on startup, unzipping them into `/app/seeders`.
-- **Split-routing**: `resolveEngineUrl` prioritises the local dev engine (`ws://localhost:5001/stream`) for local testing — 12-Factor App methodology — and falls back to cloud-hosted endpoints (e.g. `wss://dataenginev2.worldwideview.dev/stream`) when nothing local is available.
+- **Local development**: The engine runs via Docker Compose on port 5000, reading seeders dynamically from `local-seeders/` (split into `community` and `private` tiers).
+- **Production**: The engine container on Coolify downloads release bundles from `wwv-seeders-community` and an internal seeders package on startup, unzipping them into `/app/seeders`.
+- **Split-routing**: `resolveEngineUrl` prioritises the local dev engine (`ws://localhost:5000/stream`) for local testing — 12-Factor App methodology — and falls back to cloud-hosted endpoints (e.g. `wss://dataenginev2.worldwideview.dev/stream`) when nothing local is available.
 
 ### Agnostic Frontend
 
@@ -160,7 +160,7 @@ When multiple entities share a screen-space cluster (busy ports, busy airspaces)
 
 ## Edition System
 
-WorldWideView ships in three editions, controlled by the `NEXT_PUBLIC_WWV_EDITION` environment variable. Feature flags are derived from this in [`src/core/edition.ts`](../src/core/edition.ts).
+WorldWideView ships in three editions, controlled at runtime by the `WWV_EDITION` environment variable (server-side), with `NEXT_PUBLIC_WWV_EDITION` kept as the build-time bake for the docker-publish images and client bundles. Precedence: `WWV_EDITION` → `NEXT_PUBLIC_WWV_EDITION` → `local`. Feature flags are derived from this in [`src/core/edition.ts`](../src/core/edition.ts).
 
 | Edition | Auth | Use case |
 |---|---|---|
@@ -176,8 +176,7 @@ Quick map of the load-bearing modules:
 
 | Path | Role |
 |---|---|
-| [`src/core/plugins/PluginManager.ts`](../src/core/plugins/PluginManager.ts) | Core plugin registry. Instantiates plugins, calls `initialize()`, manages lifecycle. |
-| [`src/core/plugins/loaders/InstalledPluginsLoader.ts`](../src/core/plugins/loaders/InstalledPluginsLoader.ts) | Dynamic ES module loader for marketplace plugins (`import(/* webpackIgnore: true */ entry)`). |
+| [`src/core/plugins/PluginManager.ts`](../src/core/plugins/PluginManager.ts) | Core plugin registry. Instantiates plugins, calls `initialize()`, manages lifecycle. Also loads marketplace plugins via `loadFromManifest` (dynamic ES module import, `import(/* webpackIgnore: true */ entry)`), driven by the `/api/marketplace/load` route and the `useMarketplaceSync` client hook. |
 | [`src/core/data/DataBus.ts`](../src/core/data/DataBus.ts) | Typed pub/sub singleton — the high-frequency event channel. |
 | [`src/core/data/WsClient.ts`](../src/core/data/WsClient.ts) | WebSocket router. Pipes engine `/stream` messages onto the DataBus. |
 | [`src/core/globe/GlobeView.tsx`](../src/core/globe/GlobeView.tsx) | The Cesium viewer container. Imagery layers, camera setup, primitive collection wiring. |
@@ -189,9 +188,6 @@ Quick map of the load-bearing modules:
 
 For deeper coverage of specific subsystems, see the rule files under [`.agents/rules/`](../.agents/rules/):
 
-- [`platform-architecture.md`](../.agents/rules/platform-architecture.md) — high-level platform goals, product vision, Edition System
-- [`application-architecture.md`](../.agents/rules/application-architecture.md) — Next.js frontend, Zustand, CesiumJS integration
-- [`plugin-architecture.md`](../.agents/rules/plugin-architecture.md) — plugin lifecycle, capability declarations, seeders
 - [`marketplace-architecture.md`](../.agents/rules/marketplace-architecture.md) — dynamic plugin installation, DB sync, CDN loading
 - [`cesium-rendering.md`](../.agents/rules/cesium-rendering.md) — globe rendering, entity types, primitives, LOD, culling
 - [`state-management.md`](../.agents/rules/state-management.md) — slice access patterns, plugin settings

@@ -59,7 +59,8 @@ Use `.nvmrc` (at project root) for Node version management -- run `nvm use` in t
 
 [Docker Desktop](https://www.docker.com/products/docker-desktop/) or a Docker installation is required to run the full development stack (PostgreSQL, Redis, data engine, Caddy reverse proxy) via `docker compose`.
 
-See [`docs/SETUP.md`](docs/SETUP.md) for detailed environment setup, including Cesium Ion token configuration.
+See [`README.md`](README.md#quick-start-local-development) for the local setup walkthrough, and
+[`.env.example`](.env.example) for every supported environment variable, including the Cesium Ion token.
 
 ---
 
@@ -94,6 +95,35 @@ New to the project? Look for issues labeled [`good first issue`](https://github.
 
 ---
 
+## Dependency Updates
+
+Dependency pull requests are handled by automation, under one rule: **an update merges itself only
+when every check has completed green, and only when it is a patch or a minor version in the npm or
+docker ecosystem.**
+
+| Update | What happens |
+|---|---|
+| Patch or minor, npm or docker | Auto-merge is enabled once every check is green, and the branch is deleted on merge. |
+| Major version | Left for a person, with a note on the pull request explaining why. |
+| A change to anything under `.github/workflows/` | Left for a person: an action bump would otherwise edit the CI that judges it. |
+| Any other ecosystem | Left for a person. |
+| Anything the decision cannot parse | Left for a person. It fails closed rather than guessing. |
+
+The decision is made by `.github/scripts/dependabot-decision.mjs`, which is plain Node with its own
+test suite:
+
+```bash
+node .github/scripts/dependabot-decision.mjs --self-test   # the rule table
+node .github/scripts/dependabot-decision.mjs --audit       # what would happen to every open update
+node .github/scripts/dependabot-decision.mjs --digest      # what needs a person
+```
+
+A weekly [dependency digest](.github/workflows/dependency-digest.yml) opens an issue when something
+needs attention: a failing check, an update open longer than a week, or the quiet case of an update
+that is mergeable and green but was never merged because a required check never reported.
+
+To stop the automation on one pull request, disable auto-merge on it. To stop it for the repository,
+delete `.github/workflows/dependabot-automerge.yml` or turn off auto-merge in the repository settings.
 ## Plugin Contributions
 
 The core extension point of WorldWideView is its **plugin system**. Each plugin is a self-contained data layer that:
@@ -102,7 +132,7 @@ The core extension point of WorldWideView is its **plugin system**. Each plugin 
 2. Transforms raw data into Cesium-ready primitives
 3. Registers itself with the `PluginRegistry`
 
-See [`docs/PLUGIN_GUIDE.md`](docs/PLUGIN_GUIDE.md) for a full walkthrough. New plugins are very welcome — if you have access to a live geospatial data feed, a plugin is the best way to contribute.
+See [`docs/plugin-quickstart.md`](docs/plugin-quickstart.md) for a full walkthrough. New plugins are very welcome — if you have access to a live geospatial data feed, a plugin is the best way to contribute.
 
 ---
 
@@ -145,7 +175,7 @@ refactor: extract billboard factory from CesiumMap
 1. Ensure your branch is up to date with `main`.
 2. Run tests and confirm they pass: `pnpm test`
 3. Fill out the [PR template](.github/PULL_REQUEST_TEMPLATE.md) completely.
-4. Request a review — PRs need at least one approval before merging.
+4. Wait for the required checks — nothing merges until every check on the pull request is green.
 5. Squash commits on merge if the history is noisy.
 
 ---
